@@ -1,59 +1,85 @@
+from kite_api import get_historical_data, place_order, e_order, get_ltp
+from telegram_bot import start_telegram_bot
 from stock_universe import get_nifty_50_stocks
-from kite_api import get_historical_data, place_order, get_ltp
+from context_engine import detect_market_context
 from strategy_engine_v2 import should_enter_trade
+from risk_engine import calculate_position_size, should_exit_trade
 from performance_logger import log_trade
 from state_manager import is_bot_running
-from risk_engine import within_risk_limits, update_daily_pnl
 import time
+import os
 
-CAPITAL = float(os.getenv("WALLET_CAPITAL", 1000))
-MAX_LOSS = float(os.getenv("MAX_LOSS", 200))
-MAX_PROFIT = float(os.getenv("MAX_PROFIT", 300))
-RISK_PER_TRADE = 0.01  # 1%
+WALLET_CAPITAL = float(os.getenv("WALLET_CAPITAL", 1000))
+MAX_PROFIT = float(os.getenv("MAX_PROFIT", 3000))
+MAX_LOSS = float(os.getenv("MAX_LOSS", 1000))
 
-def calculate_position_size(price):
-    risk_amount = CAPITAL * RISK_PER_TRADE
-    stop_loss = price * 0.01  # 1% SL
-    qty = int(risk_amount / stop_loss)
-    return max(1, qty)
+daily_profit = 0
+daily_loss = 0
+open_positions = {}
 
-def main():
-    print("📈 Starting Trident Trade Bot...")
+def run_bot():
+    global daily_profit, daily_loss
+    print("🚀 Trident Bot Started")
 
     while True:
         if not is_bot_running():
-            print("⏸️ Bot is paused. Sleeping for 60s...")
-            time.sleep(60)
+            print("⏸️ Bot paused. Waiting to resume...")
+            time.sleep(10)
             continue
 
-        symbols = get_nifty_50_stocks()
-        for symbol in symbols:
+        trend = detect_market_context()
+        print(f"📈 Market Trend: {trend}")
+
+        stocks = get_nifty_50_stocks()
+        for stock in stocks:
             try:
-                ltp = get_ltp(symbol)
-                historical_data = get_historical_data(symbol)
+                ltp = get_ltp(stock)
+                data = get_historical_data(stock, interval="5minute", days=3)
 
-                signal, reason = should_enter_trade(historical_data)
-                if signal:
-                    if not within_risk_limits():
-                        print("🛑 Risk limit reached. Halting trades.")
-                        break
+                if should_enter_trade(data, trend):
+                    if stock in open_positions:
+                        continue  # Already in trade
 
-                    qty = calculate_position_size(ltp)
-                    sl = round(ltp * 0.99, 2)  # 1% SL
-                    tp = round(ltp * 1.015, 2)  # 1.5% Target
+                    sl, target = data['Close'].iloc[-1] * 0.98, data['Close'].iloc[-1] * 1.03
+                    qty = calculate_position_size(WALLET_CAPITAL, data['Close'].iloc[-1], sl)
 
-                    order = place_order(symbol=symbol, qty=qty, order_type="BUY")
-                    print(f"✅ Order Placed: {symbol} @ ₹{ltp}, Qty: {qty}, SL: ₹{sl}, Target: ₹{tp}")
+                    order_id = place_order(stock, qty, "BUY")
+                    open_positions[stock] = {
+                        "qty": qty,
+                        "entry": ltp,
+                        "sl": sl,
+                        "target": target,
+                        "order_id": order_id
+                    }
+                    log_trade(stock, "BUY", ltp, qty)
+                    print(f"🟢 Entered trade: {stock} at {ltp}")
 
-                    log_trade(symbol, ltp, sl, tp, qty, reason)
-                    update_daily_pnl(ltp, sl, tp)
+                elif stock in open_positions:
+                    position = open_positions[stock]
+                    if should_exit_trade(ltp, position["sl"], position["target"]):
+                        e_order(stock, position["qty"], "SELL")
+                        pnl = (ltp - position["entry"]) * position["qty"]
+                        daily_profit += pnl if pnl > 0 else 0
+                        daily_loss += -pnl if pnl < 0 else 0
+                        log_trade(stock, "SELL", ltp, position["qty"], pnl)
+                        print(f"🔴 Exited trade: {stock} at {ltp}, PnL: ₹{pnl:.2f}")
+                        del open_positions[stock]
 
-                    time.sleep(2)
+                # Risk management
+                if daily_profit >= MAX_PROFIT:
+                    print(f"🎯 Daily profit target ₹{MAX_PROFIT} hit. Stopping bot.")
+                    break
+                if daily_loss >= MAX_LOSS:
+                    print(f"⚠️ Daily loss limit ₹{MAX_LOSS} hit. Stopping bot.")
+                    break
 
             except Exception as e:
-                print(f"⚠️ Error processing {symbol}: {e}")
+                print(f"⚠️ Error processing {stock}: {e}")
 
-        time.sleep(60)
+        time.sleep(60)  # wait before next cycle
 
 if __name__ == "__main__":
-    main()
+    import threading
+    bot_thread = threading.Thread(target=start_telegram_bot)
+    bot_thread.start()
+    run_bot()
