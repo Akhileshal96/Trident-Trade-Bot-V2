@@ -1,56 +1,49 @@
-from utils import get_candles, calculate_ema, calculate_rsi, calculate_macd
-from context_engine import detect_market_context
+import pandas as pd
+import numpy as np
 
-# Strategy: Buy if majority of indicators align with trend
-# - EMA crossover (short > long)
-# - RSI < 60 and rising
-# - MACD above signal line
-# - Nifty trend must support direction
+def calculate_ema(data, period=20):
+    return data['Close'].ewm(span=period, adjust=False).mean()
 
-MIN_CONDITIONS = 4
+def calculate_rsi(data, period=14):
+    delta = data['Close'].diff()
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=period).mean()
+    avg_loss = pd.Series(loss).rolling(window=period).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
 
-def evaluate_stock_v2(symbol):
-    try:
-        df = get_candles(symbol, interval="5minute", days=2)
-        if df is None or df.empty or len(df) < 50:
-            return "hold", "Insufficient data"
+def calculate_macd(data):
+    ema12 = data['Close'].ewm(span=12, adjust=False).mean()
+    ema26 = data['Close'].ewm(span=26, adjust=False).mean()
+    macd = ema12 - ema26
+    signal = macd.ewm(span=9, adjust=False).mean()
+    return macd, signal
 
-        df["EMA20"] = calculate_ema(df, 20)
-        df["EMA50"] = calculate_ema(df, 50)
-        df["RSI"] = calculate_rsi(df)
-        df["MACD"], df["SIGNAL"] = calculate_macd(df)
+def should_enter_trade(data, market_trend):
+    data = data.copy()
+    data['EMA20'] = calculate_ema(data, 20)
+    data['RSI'] = calculate_rsi(data)
+    data['MACD'], data['MACD_signal'] = calculate_macd(data)
 
-        latest = df.iloc[-1]
-        context = detect_market_context()
+    latest = data.iloc[-1]
 
-        conditions = 0
-        reasons = []
+    trend_match = (
+        (market_trend == 'bullish' and latest['EMA20'] < latest['Close']) or
+        (market_trend == 'bearish' and latest['EMA20'] > latest['Close'])
+    )
 
-        # EMA Crossover
-        if latest["EMA20"] > latest["EMA50"]:
-            conditions += 1
-            reasons.append("EMA20 > EMA50")
+    rsi_condition = (
+        latest['RSI'] > 50 if market_trend == 'bullish'
+        else latest['RSI'] < 50
+    )
 
-        # RSI Logic
-        if latest["RSI"] < 60 and df["RSI"].iloc[-1] > df["RSI"].iloc[-2]:
-            conditions += 1
-            reasons.append("RSI rising")
+    macd_condition = (
+        latest['MACD'] > latest['MACD_signal'] if market_trend == 'bullish'
+        else latest['MACD'] < latest['MACD_signal']
+    )
 
-        # MACD > Signal Line
-        if latest["MACD"] > latest["SIGNAL"]:
-            conditions += 1
-            reasons.append("MACD > Signal")
+    if trend_match and rsi_condition and macd_condition:
+        return True
 
-        # Market Context
-        if context == "bullish":
-            conditions += 1
-            reasons.append("Bullish market context")
-
-        if conditions >= MIN_CONDITIONS:
-            reason = ", ".join(reasons)
-            return "buy", reason
-        else:
-            return "hold", "Not enough confirmations"
-
-    except Exception as e:
-        return "error", str(e)
+    return False
