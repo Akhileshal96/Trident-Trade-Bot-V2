@@ -57,7 +57,7 @@ def run_bot():
                 elif stock in open_positions:
                     position = open_positions[stock]
                     if should_exit_trade(ltp, position["sl"], position["target"]):
-                        e_order(stock, position["qty"], "SELL")
+                        e_order(stock, position["qty"])
                         pnl = (ltp - position["entry"]) * position["qty"]
                         daily_profit += pnl if pnl > 0 else 0
                         daily_loss += -pnl if pnl < 0 else 0
