@@ -1,72 +1,59 @@
-import asyncio
-from strategy_engine_v2 import evaluate_stock_v2
-from stock_universe import fetch_nse_symbols
-from utils import get_candles
-from kite_api import kite
-from risk_engine import can_trade, log_trade, update_pnl
-from telegram_bot import notify_trade_entry, notify_exit
+from stock_universe import get_nifty_50_stocks
+from kite_api import get_historical_data, place_order, get_ltp
+from strategy_engine_v2 import should_enter_trade
+from performance_logger import log_trade
+from state_manager import is_bot_running
+from risk_engine import within_risk_limits, update_daily_pnl
 import time
 
-TRADE_INTERVAL = 300  # seconds (5 minutes)
-TARGET_PERCENT = 1.5  # Target profit percent
-STOPLOSS_PERCENT = 1.0  # Stop-loss percent
+CAPITAL = float(os.getenv("WALLET_CAPITAL", 1000))
+MAX_LOSS = float(os.getenv("MAX_LOSS", 200))
+MAX_PROFIT = float(os.getenv("MAX_PROFIT", 300))
+RISK_PER_TRADE = 0.01  # 1%
 
-async def run_trading_loop():
-    print("✅ Trident Bot Live Trading Started")
+def calculate_position_size(price):
+    risk_amount = CAPITAL * RISK_PER_TRADE
+    stop_loss = price * 0.01  # 1% SL
+    qty = int(risk_amount / stop_loss)
+    return max(1, qty)
+
+def main():
+    print("📈 Starting Trident Trade Bot...")
 
     while True:
-        if not can_trade():
-            print("⏸️ Trading paused due to risk limits.")
-            await asyncio.sleep(TRADE_INTERVAL)
+        if not is_bot_running():
+            print("⏸️ Bot is paused. Sleeping for 60s...")
+            time.sleep(60)
             continue
 
-        symbols = fetch_nse_symbols("NIFTY 50")
+        symbols = get_nifty_50_stocks()
         for symbol in symbols:
-            print(f"🔍 Checking {symbol}...")
-            decision, reason = evaluate_stock_v2(symbol)
+            try:
+                ltp = get_ltp(symbol)
+                historical_data = get_historical_data(symbol)
 
-            if decision == "buy":
-                try:
-                    ltp = kite.ltp(f"NSE:{symbol}")[f"NSE:{symbol}"]["last_price"]
-                    sl_price = round(ltp * (1 - STOPLOSS_PERCENT / 100), 2)
-                    tp_price = round(ltp * (1 + TARGET_PERCENT / 100), 2)
-                    qty = 1  # Later: make dynamic based on capital and SL risk
+                signal, reason = should_enter_trade(historical_data)
+                if signal:
+                    if not within_risk_limits():
+                        print("🛑 Risk limit reached. Halting trades.")
+                        break
 
-                    order_id = kite.place_order(
-                        variety=kite.VARIETY_REGULAR,
-                        exchange=kite.EXCHANGE_NSE,
-                        tradingsymbol=symbol,
-                        transaction_type=kite.TRANSACTION_TYPE_BUY,
-                        quantity=qty,
-                        product=kite.PRODUCT_MIS,
-                        order_type=kite.ORDER_TYPE_MARKET
-                    )
+                    qty = calculate_position_size(ltp)
+                    sl = round(ltp * 0.99, 2)  # 1% SL
+                    tp = round(ltp * 1.015, 2)  # 1.5% Target
 
-                    await notify_trade_entry(symbol, ltp, sl_price, tp_price, qty, reason)
-                    print(f"✅ Buy order placed: {symbol} @ ₹{ltp}")
+                    order = place_order(symbol=symbol, qty=qty, order_type="BUY")
+                    print(f"✅ Order Placed: {symbol} @ ₹{ltp}, Qty: {qty}, SL: ₹{sl}, Target: ₹{tp}")
 
-                    # Monitor for SL or TP hit (exit simulation)
-                    exited = False
-                    while not exited:
-                        new_ltp = kite.ltp(f"NSE:{symbol}")[f"NSE:{symbol}"]["last_price"]
-                        if new_ltp >= tp_price:
-                            pnl = (tp_price - ltp) * qty
-                            await notify_exit(symbol, tp_price, pnl)
-                            log_trade(symbol, ltp, tp_price, qty, pnl)
-                            update_pnl(pnl)
-                            exited = True
-                        elif new_ltp <= sl_price:
-                            pnl = (sl_price - ltp) * qty
-                            await notify_exit(symbol, sl_price, pnl)
-                            log_trade(symbol, ltp, sl_price, qty, pnl)
-                            update_pnl(pnl)
-                            exited = True
-                        await asyncio.sleep(15)
+                    log_trade(symbol, ltp, sl, tp, qty, reason)
+                    update_daily_pnl(ltp, sl, tp)
 
-                except Exception as e:
-                    print(f"❌ Error while placing order for {symbol}: {e}")
+                    time.sleep(2)
 
-        await asyncio.sleep(TRADE_INTERVAL)
+            except Exception as e:
+                print(f"⚠️ Error processing {symbol}: {e}")
 
-if __name__ == '__main__':
-    asyncio.run(run_trading_loop())
+        time.sleep(60)
+
+if __name__ == "__main__":
+    main()
