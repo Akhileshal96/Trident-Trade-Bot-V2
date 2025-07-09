@@ -10,7 +10,6 @@ def fetch_nse_symbols(index="NIFTY 50"):
         "BANKNIFTY": "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20BANK",
         "FINNIFTY": "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20FINANCIAL%20SERVICES"
     }
-
     try:
         session = requests.Session()
         session.get("https://www.nseindia.com", headers=headers)
