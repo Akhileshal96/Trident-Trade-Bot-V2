@@ -1,21 +1,19 @@
-from utils import get_candles, calculate_ema
+import yfinance as yf
 
 def detect_market_context():
-    """
-    Determines the market trend using EMA crossover on NIFTY 50.
-    Returns: 'bullish', 'bearish', or 'neutral'
-    """
-    df = get_candles("NIFTY 50", interval="5minute", days=2)
-    if df is None or df.empty:
-        return "neutral"
+    try:
+        nifty = yf.download("^NSEI", period="5d", interval="1d")
+        if len(nifty) < 2:
+            return "neutral"
 
-    df["EMA20"] = calculate_ema(df, 20)
-    df["EMA50"] = calculate_ema(df, 50)
+        change = (nifty['Close'].iloc[-1] - nifty['Close'].iloc[-2]) / nifty['Close'].iloc[-2] * 100
 
-    latest = df.iloc[-1]
-    if latest["EMA20"] > latest["EMA50"]:
-        return "bullish"
-    elif latest["EMA20"] < latest["EMA50"]:
-        return "bearish"
-    else:
+        if change > 0.3:
+            return "bullish"
+        elif change < -0.3:
+            return "bearish"
+        else:
+            return "neutral"
+    except Exception as e:
+        print(f"⚠️ Error detecting market context: {e}")
         return "neutral"
